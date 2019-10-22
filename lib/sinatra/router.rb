@@ -1,6 +1,7 @@
 module Sinatra
+  # Router class to avoid use of ALL middleware
   class Router
-    def initialize(app=nil, *args, &block)
+    def initialize(app = nil, *_args, &block)
       @app        = app
       @apps       = []
       @conditions = []
@@ -11,20 +12,15 @@ module Sinatra
     end
 
     def call(env)
-      if ret = try_route(env["REQUEST_METHOD"], env["PATH_INFO"], env)
-        ret
-      else
-        raise "router needs to be (1) mounted as middleware or (b) contain " +
-          "a default run statement" if !@app && !@run
+      ret = try_route(env['REQUEST_METHOD'], env['PATH_INFO'], env)
+      return ret unless ret.nil?
 
-        # if set as middlware, prefer that, otherwise try default run module
-        (@app || @run).call(env)
-      end
+      call_default_app(env)
     end
 
     # specify the default app to run if no other app routes matched
     def run(app)
-      raise "@run already set" if @run
+      raise '@run already set' if @run
       @run = app
     end
 
@@ -45,17 +41,30 @@ module Sinatra
 
     def with_conditions(*args, &block)
       old = @conditions
-      @conditions = @conditions + args
+      @conditions += args
       instance_eval(&block) if block
       @conditions = old
     end
 
     private
 
+    def call_default_app(env)
+      raise usage_string unless default_app
+
+      default_app.call(env)
+    end
+
+    def default_app
+      @app || @run
+    end
+
+    def usage_string
+      'router needs to be mounted as middleware or contain a run statement'
+    end
+
     def build_routing_table
-      all_routes = {}
-      @apps.each do |app, conditions|
-        next unless app.respond_to?(:routes)
+      apps_with_routes.each_with_object({}) do |app_cond, all_routes|
+        app, conditions = app_cond
         app.routes.each do |verb, routes|
           all_routes[verb] ||= []
           all_routes[verb] += routes.map do |pattern, _, _, _|
@@ -63,30 +72,27 @@ module Sinatra
           end
         end
       end
-      all_routes
     end
 
-    def conditions_match?(conditions, env)
-      conditions.each do |condition|
-        return false unless condition.call(env)
-      end
-      true
+    def apps_with_routes
+      @apps.select { |app, _conds| app.respond_to?(:routes) }
     end
 
     def try_route(verb, path, env)
       # see Sinatra's `route!`
-      if verb_routes = @routes[verb]
-        verb_routes.each do |pattern, conditions, app|
-          if pattern.match(path) && conditions_match?(conditions, env)
-            status, headers, response = app.call(env)
+      return unless @routes[verb].is_a?(Array)
 
-            # if we got a pass, keep trying routes
-            next if headers["X-Cascade"] == "pass"
+      @routes[verb].each do |pattern, conditions, app|
+        next unless pattern.match(path)
+        next unless conditions.all? { |condition| condition.call(env) }
 
-            return status, headers, response
-          end
-        end
+        status, headers, response = app.call(env)
+        # if we got a pass, keep trying routes
+        next if headers['X-Cascade'] == 'pass'
+
+        return status, headers, response
       end
+
       nil
     end
   end
